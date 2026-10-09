@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Control Plane V1 Slack Gateway
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/aioperator/worker/credentials/ai-control-plane/slack-signing-secret
+ConditionPathExists=/home/aioperator/.config/ops-dashboard-credentials/AIRTABLE_PAT
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v1
+Environment=CONTROL_PLANE_V1_HOST=127.0.0.1
+Environment=CONTROL_PLANE_V1_PORT=8798
+Environment=CONTROL_PLANE_V1_STATE=/home/aioperator/control-plane/state/control-plane-v1
+ExecStart=/usr/bin/env node /home/aioperator/control-plane/runtime/control-plane-v1/gateway.mjs
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+
+[Install]
+WantedBy=default.target
