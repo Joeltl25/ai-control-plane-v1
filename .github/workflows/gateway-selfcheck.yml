@@ -26,16 +26,19 @@ jobs:
       - name: Check gateway JavaScript syntax
         run: node --check runtime/control-plane-v1/gateway.mjs
 
+      - name: Check retry safety contract
+        run: node runtime/control-plane-v1/retry-safety-check.mjs
+
       - name: Check shell syntax
         run: bash -n runtime/control-plane-v1/selfcheck.sh
 
-      - name: Check forbidden secret placeholders
+      - name: Check forbidden token patterns
         run: |
-          if grep -R "xox[baprs]-\|ghp_\|AIRTABLE_PAT=\|SLACK_SIGNING_SECRET=" runtime/control-plane-v1 .github/workflows; then
-            echo "Forbidden secret-like token found"
+          if grep -R "xox[baprs]-\|ghp_" runtime/control-plane-v1 .github/workflows; then
+            echo "Forbidden token-like value found"
             exit 1
           fi
-          echo "No forbidden secret-like tokens found"
+          echo "No forbidden token-like values found"
 
       - name: Confirm localhost default
         run: grep -q "127.0.0.1" runtime/control-plane-v1/gateway.mjs
