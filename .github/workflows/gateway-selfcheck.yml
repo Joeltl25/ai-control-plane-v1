@@ -1,0 +1,41 @@
+name: gateway-selfcheck
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/control-plane-v1/**'
+      - '.github/workflows/gateway-selfcheck.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'runtime/control-plane-v1/**'
+      - '.github/workflows/gateway-selfcheck.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-and-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check gateway JavaScript syntax
+        run: node --check runtime/control-plane-v1/gateway.mjs
+
+      - name: Check shell syntax
+        run: bash -n runtime/control-plane-v1/selfcheck.sh
+
+      - name: Check forbidden secret placeholders
+        run: |
+          if grep -R "xox[baprs]-\|ghp_\|AIRTABLE_PAT=\|SLACK_SIGNING_SECRET=" runtime/control-plane-v1 .github/workflows; then
+            echo "Forbidden secret-like token found"
+            exit 1
+          fi
+          echo "No forbidden secret-like tokens found"
+
+      - name: Confirm localhost default
+        run: grep -q "127.0.0.1" runtime/control-plane-v1/gateway.mjs
