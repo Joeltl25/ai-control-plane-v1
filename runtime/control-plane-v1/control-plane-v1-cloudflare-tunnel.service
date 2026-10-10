@@ -1,0 +1,29 @@
+[Unit]
+Description=AI Control Plane V1 Dedicated Cloudflare VPC Tunnel
+Documentation=https://developers.cloudflare.com/workers-vpc/configuration/tunnel/
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/home/aioperator/worker/credentials/ai-control-plane/cloudflare-tunnel-token
+StartLimitIntervalSec=300
+StartLimitBurst=12
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v1
+ExecStartPre=/usr/bin/test -s /home/aioperator/worker/credentials/ai-control-plane/cloudflare-tunnel-token
+ExecStart=/home/aioperator/.local/bin/cloudflared tunnel --no-autoupdate run --token-file /home/aioperator/worker/credentials/ai-control-plane/cloudflare-tunnel-token
+Restart=on-failure
+RestartSec=12
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v1/logs
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target
