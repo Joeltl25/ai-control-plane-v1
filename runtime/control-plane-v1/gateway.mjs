@@ -17,6 +17,7 @@ const CFG = {
   leasesTable: process.env.CONTROL_PLANE_LEASES_TABLE || 'tblkDigmZvdUZIpuQ',
   changeLogTable: process.env.CONTROL_PLANE_CHANGE_LOG_TABLE || 'tblocfVQMPF7nuMBP',
   approvalsTable: process.env.CONTROL_PLANE_APPROVALS_TABLE || 'tbly8EGid6CbGaHVr',
+  projectsTable: process.env.CONTROL_PLANE_PROJECTS_TABLE || 'tblMJiGB0mS0Rmwjk',
   leaseMinutes: Number(process.env.CONTROL_PLANE_LEASE_MINUTES || 20),
   workerName: process.env.CONTROL_PLANE_WORKER_NAME || 'vps-local-gateway'
 };
@@ -75,8 +76,17 @@ function parsePayload(rawBody, contentType) {
   return out;
 }
 
-function commandText(payload) {
-  return String(payload.text || payload.command || '').trim().replace(/^\//, '').toUpperCase();
+function parseCommand(payload) {
+  const raw = String(payload.text || '').trim().replace(/^\//, '');
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  if (!normalized) return { command: 'STATUS', target: '' };
+  const upper = normalized.toUpperCase();
+  if (upper === 'APPROVE PLAN' || upper.startsWith('APPROVE PLAN ')) {
+    return { command: 'APPROVE PLAN', target: normalized.slice('APPROVE PLAN'.length).trim() };
+  }
+  const first = normalized.split(' ')[0].toUpperCase();
+  const target = normalized.split(' ').slice(1).join(' ').trim();
+  return { command: first, target };
 }
 
 function short(value, max = 900) {
@@ -169,6 +179,67 @@ function formatJob(record) {
   return parts.join('\n');
 }
 
+function norm(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+async function listProjects() {
+  return listRecords(CFG.projectsTable, {
+    pageSize: 50,
+    'sort[0][field]': 'Project',
+    'sort[0][direction]': 'asc'
+  });
+}
+
+function projectMatches(record, target) {
+  const needle = norm(target);
+  if (!needle) return false;
+  const f = record.fields || {};
+  const candidates = [f.Project, f['GitHub Repo'], f.Purpose, f['Slack Channel']].map(norm).join(' | ');
+  return candidates.includes(needle) || needle.split(' ').every(part => candidates.includes(part));
+}
+
+function oneLineProject(record) {
+  const f = record.fields || {};
+  const status = f.Status || 'Unknown';
+  const prod = f['Production State'] || 'Unknown';
+  const route = short(f['Current Route'] || 'No route recorded.', 95);
+  return `• ${f.Project || record.id}: ${status} / ${prod} — ${route}`;
+}
+
+async function formatAllProjects(currentJob) {
+  const projects = await listProjects();
+  const visible = projects.filter(r => String(r.fields?.Status || '') !== 'Archived').slice(0, 12);
+  const lines = ['AI control plane status:', '', 'Projects:'];
+  if (!visible.length) lines.push('No project registry rows found.');
+  for (const record of visible) lines.push(oneLineProject(record));
+  lines.push('', 'Top job:', formatJob(currentJob));
+  lines.push('', 'Use: /ai STATUS <project>, /ai PLAN <project>, /ai CODE <project>, /ai STOP <project>.');
+  return lines.join('\n');
+}
+
+async function formatProjectStatus(target, currentJob) {
+  if (!target) return formatAllProjects(currentJob);
+  const projects = await listProjects();
+  const needle = norm(target);
+  const record = projects.find(r => norm(r.fields?.Project).includes(needle) || needle.includes(norm(r.fields?.Project))) || projects.find(r => projectMatches(r, target));
+  if (!record) return `Project not found: ${target}\nUse /ai STATUS to list registered projects.`;
+  const f = record.fields || {};
+  const jobs = await listRecords(CFG.jobsTable, { pageSize: 50 });
+  const related = jobs.filter(j => norm(j.fields?.['Project Key']).includes(norm(f.Project)) || norm(f.Project).includes(norm(j.fields?.['Project Key']))).slice(0, 3);
+  const out = [
+    `${f.Project || target}: ${f.Status || 'Unknown'} / ${f['Production State'] || 'Unknown'}`,
+    `Route: ${short(f['Current Route'] || 'No route recorded.', 450)}`,
+    `Worker: ${f['Default Worker'] || 'Not set'}`,
+    `Phone: ${short(f['Phone Control Rule'] || 'Use approved Slack /ai commands.', 260)}`
+  ];
+  if (related.length) {
+    out.push('Jobs:');
+    for (const j of related) out.push(`• ${j.fields?.['Job ID'] || j.id}: ${j.fields?.Status || 'Unknown'} — ${short(j.fields?.['Next Action'] || j.fields?.['Current Step'] || '', 140)}`);
+  }
+  return out.join('\n');
+}
+
 function leaseUntil() {
   return new Date(Date.now() + CFG.leaseMinutes * 60 * 1000).toISOString();
 }
@@ -224,15 +295,15 @@ async function markJob(record, status, step) {
   return `${jobId}: ${status}.`;
 }
 
-async function handleAllowedCommand(command) {
+async function handleAllowedCommand(command, target = '') {
   const job = await getCurrentJob();
   let result;
   switch (command) {
     case 'STATUS':
-      result = formatJob(job);
+      result = await formatProjectStatus(target, job);
       break;
     case 'PLAN':
-      result = 'PLAN accepted. Create draft tickets only; no code execution.';
+      result = target ? `PLAN accepted for ${target}. Create draft tickets only; no code execution.` : 'PLAN accepted. Create draft tickets only; no code execution.';
       break;
     case 'APPROVE PLAN':
       result = await markJob(job, 'Ready', 'Slack APPROVE PLAN accepted. Draft tickets may enter the queue.');
@@ -256,7 +327,7 @@ async function handleAllowedCommand(command) {
       result = await markJob(job, 'Paused', 'Slack STOP accepted. Job paused safely.');
       break;
     case 'DISCUSS':
-      result = `DISCUSS packet: ${formatJob(job)}`;
+      result = `DISCUSS packet:\n${await formatProjectStatus(target, job)}`;
       break;
     default:
       result = 'Unknown command.';
@@ -266,14 +337,14 @@ async function handleAllowedCommand(command) {
 }
 
 async function handlePayload(payload) {
-  const command = commandText(payload);
+  const { command, target } = parseCommand(payload);
   const user = String(payload.user_id || payload.user || '').trim();
   const channel = String(payload.channel_id || payload.channel || '').trim();
   if (user !== CFG.approvedUser) return { status: 403, text: 'Rejected: not approved user.' };
   if (channel !== CFG.approvedChannel) return { status: 403, text: 'Rejected: not approved channel.' };
-  if (!ALLOWED_COMMANDS.has(command)) return { status: 400, text: 'Allowed: STATUS, PLAN, APPROVE PLAN, CODE, APPROVE, RETRY, SWITCH, RESET, STOP, DISCUSS.' };
-  saveAudit({ receivedAt: new Date().toISOString(), command, user, channel });
-  const text = await handleAllowedCommand(command);
+  if (!ALLOWED_COMMANDS.has(command)) return { status: 400, text: 'Allowed: STATUS [project], PLAN [project], APPROVE PLAN [project], CODE [project], APPROVE, RETRY, SWITCH, RESET, STOP [project], DISCUSS [project].' };
+  saveAudit({ receivedAt: new Date().toISOString(), command, target, user, channel });
+  const text = await handleAllowedCommand(command, target);
   return { status: 200, text };
 }
 
