@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Control Plane V2 SQLite Gateway
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
+Environment=CONTROL_PLANE_V2_HOST=127.0.0.1
+Environment=CONTROL_PLANE_V2_PORT=8801
+ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2 /home/aioperator/control-plane/runtime/control-plane-v2
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target
