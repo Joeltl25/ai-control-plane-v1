@@ -1,0 +1,50 @@
+openapi: 3.1.0
+info:
+  title: AI Workspace Control Plane Launcher
+  version: 2.0.0
+  description: One-action launcher for phone-controlled AI work. The GPT/plugin calls this API first and never chooses random tools.
+servers:
+  - url: https://ai-control-plane-slack-ingress.joeltl25.workers.dev
+security:
+  - bearerAuth: []
+paths:
+  /bootstrap_or_continue:
+    post:
+      operationId: bootstrap_or_continue
+      summary: Ask the VPS control plane what to continue next.
+      description: Default action when the launcher opens. The VPS reads SQLite, resolves the active project/job, and returns the next safe action.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                intent:
+                  type: string
+                  enum: [CONTINUE, STATUS, PLAN, DISCUSS]
+                  default: CONTINUE
+                project:
+                  type: string
+                  description: Optional project name or alias. Leave empty to let the control plane choose by priority.
+                target:
+                  type: string
+                  description: Optional fallback alias for project.
+      responses:
+        '200':
+          description: Current control-plane state and next safe action.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          description: Missing or invalid launcher bearer token.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
