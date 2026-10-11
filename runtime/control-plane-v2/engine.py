@@ -1,4 +1,4 @@
-import json, os, sqlite3, time, re, subprocess
+import json, os, sqlite3, time, re, subprocess, uuid
 from pathlib import Path
 
 DEFAULT_DB = '/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite'
@@ -284,6 +284,79 @@ def kill_worker_service_for_job(job):
     result['stop'] = run_systemctl(['stop', unit])
     result['killed'] = bool(result['term'].get('ok') or result['kill'].get('ok') or result['stop'].get('ok'))
     return result
+
+def utc_plus_seconds(seconds):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + int(seconds)))
+
+def expire_old_leases(con):
+    ts = now_iso()
+    expired = con.execute("SELECT lease_id, job_id FROM leases WHERE status='Active' AND locked_until < ?", (ts,)).fetchall()
+    for row in expired:
+        con.execute("UPDATE leases SET status='Expired', recovery_action='Lease expired by queue manager', heartbeat_at=? WHERE lease_id=?", (ts, row['lease_id']))
+        con.execute("UPDATE jobs SET status='Needs Worker', locked_by=NULL, locked_until=NULL, current_step=?, updated_at=? WHERE job_id=? AND status='In Progress'", ('Lease expired; returned to Needs Worker.', ts, row['job_id']))
+        enqueue_outbox(con, 'job', row['job_id'], {'job_id': row['job_id'], 'status': 'Needs Worker', 'current_step': 'Lease expired; returned to Needs Worker.', 'updated_at': ts})
+    if expired:
+        event(con, 'WARN', 'lease', 'Expired stale leases', data={'count': len(expired), 'jobs': [r['job_id'] for r in expired]})
+    return len(expired)
+
+def claim_next_job(con, worker_key='v2-local-worker', lease_seconds=1200, project_key=None):
+    expire_old_leases(con)
+    rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE status IN ('Ready','Needs Worker') ORDER BY updated_at DESC LIMIT 200"))
+    if project_key:
+        rows = [r for r in rows if r.get('project_key') == project_key]
+    if not rows:
+        event(con, 'INFO', 'claim', 'No claimable job found', project_key=project_key, data={'worker': worker_key})
+        return {'ok': True, 'claimed': False, 'message': 'No claimable job found.'}
+    rows.sort(key=lambda r: (priority_rank(r.get('priority')), r.get('updated_at') or ''))
+    job = rows[0]
+    lease_id = 'lease-' + uuid.uuid4().hex[:16]
+    locked_until = utc_plus_seconds(lease_seconds)
+    now = now_iso()
+    try:
+        con.execute('BEGIN IMMEDIATE')
+        fresh = con.execute("SELECT status, locked_by FROM jobs WHERE job_id=?", (job['job_id'],)).fetchone()
+        if not fresh or fresh['status'] not in ('Ready','Needs Worker'):
+            con.execute('ROLLBACK')
+            return {'ok': True, 'claimed': False, 'message': 'Job changed before claim.'}
+        con.execute("INSERT INTO leases(lease_id,job_id,resource,locked_by,locked_until,status,heartbeat_at,created_at) VALUES(?,?,?,?,?,'Active',?,?)",
+                    (lease_id, job['job_id'], 'systemd-worker', worker_key, locked_until, now, now))
+        con.execute("UPDATE jobs SET status='In Progress', locked_by=?, locked_until=?, current_step=?, updated_at=? WHERE job_id=?",
+                    (worker_key, locked_until, 'Claimed by V2 queue manager; placeholder worker execution allowed only.', now, job['job_id']))
+        con.execute('COMMIT')
+    except Exception:
+        try:
+            con.execute('ROLLBACK')
+        except Exception:
+            pass
+        raise
+    payload = {'job_id': job['job_id'], 'status': 'In Progress', 'locked_by': worker_key, 'locked_until': locked_until, 'current_step': 'Claimed by V2 queue manager; placeholder worker execution allowed only.', 'updated_at': now}
+    enqueue_outbox(con, 'job', job['job_id'], payload)
+    event(con, 'INFO', 'claim', 'Claimed job lease', job.get('project_key'), job.get('job_id'), {'lease_id': lease_id, 'worker': worker_key, 'locked_until': locked_until})
+    return {'ok': True, 'claimed': True, 'job_id': job['job_id'], 'lease_id': lease_id, 'locked_until': locked_until, 'worker': worker_key}
+
+def complete_job(con, job_id, worker_key='v2-local-worker', status='Needs Review', message='Placeholder worker completed; needs review before real execution.'):
+    now = now_iso()
+    row = con.execute('SELECT * FROM jobs WHERE job_id=?', (job_id,)).fetchone()
+    if not row:
+        return {'ok': False, 'error': 'job_not_found'}
+    if row['locked_by'] and row['locked_by'] != worker_key:
+        return {'ok': False, 'error': 'lease_owned_by_other_worker', 'locked_by': row['locked_by']}
+    con.execute("UPDATE leases SET status='Released', heartbeat_at=?, recovery_action=? WHERE job_id=? AND status='Active'", (now, 'Completed by worker manager', job_id))
+    con.execute("UPDATE jobs SET status=?, current_step=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE job_id=?", (status, message, now, job_id))
+    enqueue_outbox(con, 'job', job_id, {'job_id': job_id, 'status': status, 'current_step': message, 'updated_at': now})
+    event(con, 'INFO', 'complete', 'Completed job lease', row['project_key'] if 'project_key' in row.keys() else None, job_id, {'status': status, 'worker': worker_key})
+    return {'ok': True, 'job_id': job_id, 'status': status}
+
+def heartbeat_job(con, job_id, worker_key='v2-local-worker', extend_seconds=1200):
+    now = now_iso()
+    locked_until = utc_plus_seconds(extend_seconds)
+    row = con.execute("SELECT * FROM jobs WHERE job_id=? AND locked_by=?", (job_id, worker_key)).fetchone()
+    if not row:
+        return {'ok': False, 'error': 'active_job_not_found_for_worker'}
+    con.execute("UPDATE leases SET heartbeat_at=?, locked_until=? WHERE job_id=? AND locked_by=? AND status='Active'", (now, locked_until, job_id, worker_key))
+    con.execute("UPDATE jobs SET locked_until=?, updated_at=? WHERE job_id=?", (locked_until, now, job_id))
+    event(con, 'INFO', 'heartbeat', 'Worker heartbeat', row['project_key'] if 'project_key' in row.keys() else None, job_id, {'worker': worker_key, 'locked_until': locked_until})
+    return {'ok': True, 'job_id': job_id, 'locked_until': locked_until}
 
 def emergency_stop(con, target=''):
     target_text = str(target or '').strip()
