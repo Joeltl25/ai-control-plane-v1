@@ -1,0 +1,277 @@
+import json
+import os
+import re
+import sqlite3
+import time
+from pathlib import Path
+
+DEFAULT_DB = '/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite'
+DB_PATH = os.environ.get('CONTROL_PLANE_V2_DB', DEFAULT_DB)
+
+
+def now_iso():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def norm(value):
+    return re.sub(r'[^a-z0-9]+', '-', str(value or '').lower()).strip('-') or 'unknown'
+
+
+def connect(db_path=DB_PATH):
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db_path, timeout=5, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA journal_mode=WAL')
+    con.execute('PRAGMA foreign_keys=ON')
+    con.execute('PRAGMA busy_timeout=5000')
+    return con
+
+
+def init_db(db_path=DB_PATH):
+    con = connect(db_path)
+    con.executescript('''
+    CREATE TABLE IF NOT EXISTS projects (
+      project_key TEXT PRIMARY KEY,
+      project_name TEXT NOT NULL,
+      status TEXT DEFAULT 'Planning',
+      production_state TEXT DEFAULT 'Unknown',
+      repo TEXT,
+      vps_path TEXT,
+      slack_channel TEXT,
+      default_worker TEXT,
+      current_route TEXT,
+      phone_rule TEXT,
+      budget_rule TEXT,
+      aliases_json TEXT DEFAULT '[]',
+      source TEXT DEFAULT 'local',
+      raw_json TEXT DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS jobs (
+      job_id TEXT PRIMARY KEY,
+      project_key TEXT,
+      status TEXT NOT NULL,
+      priority TEXT DEFAULT 'Normal',
+      request TEXT,
+      current_step TEXT,
+      next_action TEXT,
+      worker TEXT,
+      branch TEXT,
+      pr_url TEXT,
+      risk TEXT DEFAULT 'Green',
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 3,
+      locked_by TEXT,
+      locked_until TEXT,
+      rollback_point TEXT,
+      source TEXT DEFAULT 'local',
+      raw_json TEXT DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(project_key) REFERENCES projects(project_key)
+    );
+    CREATE TABLE IF NOT EXISTS leases (
+      lease_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      resource TEXT,
+      locked_by TEXT NOT NULL,
+      locked_until TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Active',
+      heartbeat_at TEXT,
+      recovery_action TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+    );
+    CREATE TABLE IF NOT EXISTS approvals (
+      approval_id TEXT PRIMARY KEY,
+      job_id TEXT,
+      approval_type TEXT,
+      status TEXT,
+      approved_by TEXT,
+      approval_text TEXT,
+      pr_url TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workers (
+      worker_key TEXT PRIMARY KEY,
+      status TEXT DEFAULT 'Available',
+      role TEXT,
+      use_for TEXT,
+      do_not_use_for TEXT,
+      cost_guard TEXT,
+      fallback_worker TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS budgets (
+      budget_key TEXT PRIMARY KEY,
+      status TEXT DEFAULT 'Active',
+      daily_cap_cents INTEGER DEFAULT 0,
+      used_cents INTEGER DEFAULT 0,
+      notes TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      level TEXT NOT NULL,
+      source TEXT NOT NULL,
+      project_key TEXT,
+      job_id TEXT,
+      message TEXT NOT NULL,
+      data_json TEXT DEFAULT '{}'
+    );
+    CREATE TABLE IF NOT EXISTS sync_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      target TEXT NOT NULL,
+      op TEXT NOT NULL,
+      entity TEXT NOT NULL,
+      entity_key TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_status_priority ON jobs(status, priority, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_key);
+    CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_sync_pending ON sync_outbox(status, attempts, ts);
+    ''')
+    return con
+
+
+def enqueue_outbox(con, entity, key, payload, target='airtable', op='upsert'):
+    con.execute('INSERT INTO sync_outbox(ts,target,op,entity,entity_key,payload_json) VALUES(?,?,?,?,?,?)',
+                (now_iso(), target, op, entity, key, json.dumps(payload, ensure_ascii=False)))
+
+
+def event(con, level, source, message, project_key=None, job_id=None, data=None):
+    con.execute('INSERT INTO events(ts,level,source,project_key,job_id,message,data_json) VALUES(?,?,?,?,?,?,?)',
+                (now_iso(), level, source, project_key, job_id, message, json.dumps(data or {}, ensure_ascii=False)))
+
+
+def upsert_project(con, p):
+    key = p.get('project_key') or norm(p.get('project_name'))
+    defaults = {
+        'project_name': key, 'status': 'Planning', 'production_state': 'Unknown',
+        'repo': '', 'vps_path': '', 'slack_channel': '', 'default_worker': '',
+        'current_route': '', 'phone_rule': '', 'budget_rule': '',
+        'aliases_json': '[]', 'source': 'local', 'raw_json': '{}'
+    }
+    defaults.update(p)
+    payload = dict(defaults, project_key=key, updated_at=now_iso())
+    con.execute('''INSERT INTO projects(project_key,project_name,status,production_state,repo,vps_path,slack_channel,default_worker,current_route,phone_rule,budget_rule,aliases_json,source,raw_json,updated_at)
+      VALUES(:project_key,:project_name,:status,:production_state,:repo,:vps_path,:slack_channel,:default_worker,:current_route,:phone_rule,:budget_rule,:aliases_json,:source,:raw_json,:updated_at)
+      ON CONFLICT(project_key) DO UPDATE SET project_name=excluded.project_name,status=excluded.status,production_state=excluded.production_state,repo=excluded.repo,vps_path=excluded.vps_path,slack_channel=excluded.slack_channel,default_worker=excluded.default_worker,current_route=excluded.current_route,phone_rule=excluded.phone_rule,budget_rule=excluded.budget_rule,aliases_json=excluded.aliases_json,source=excluded.source,raw_json=excluded.raw_json,updated_at=excluded.updated_at''', payload)
+    enqueue_outbox(con, 'project', key, payload)
+    return key
+
+
+def upsert_job(con, j):
+    key = j.get('job_id') or f'job-{int(time.time())}'
+    defaults = {
+        'project_key': None, 'status': 'Ready', 'priority': 'Normal',
+        'request': '', 'current_step': '', 'next_action': '', 'worker': '',
+        'branch': '', 'pr_url': '', 'risk': 'Green', 'attempts': 0,
+        'max_attempts': 3, 'locked_by': '', 'locked_until': '',
+        'rollback_point': '', 'source': 'local', 'raw_json': '{}'
+    }
+    defaults.update(j)
+    payload = dict(defaults, job_id=key, updated_at=now_iso())
+    con.execute('''INSERT INTO jobs(job_id,project_key,status,priority,request,current_step,next_action,worker,branch,pr_url,risk,attempts,max_attempts,locked_by,locked_until,rollback_point,source,raw_json,updated_at)
+      VALUES(:job_id,:project_key,:status,:priority,:request,:current_step,:next_action,:worker,:branch,:pr_url,:risk,:attempts,:max_attempts,:locked_by,:locked_until,:rollback_point,:source,:raw_json,:updated_at)
+      ON CONFLICT(job_id) DO UPDATE SET project_key=excluded.project_key,status=excluded.status,priority=excluded.priority,request=excluded.request,current_step=excluded.current_step,next_action=excluded.next_action,worker=excluded.worker,branch=excluded.branch,pr_url=excluded.pr_url,risk=excluded.risk,attempts=excluded.attempts,max_attempts=excluded.max_attempts,locked_by=excluded.locked_by,locked_until=excluded.locked_until,rollback_point=excluded.rollback_point,source=excluded.source,raw_json=excluded.raw_json,updated_at=excluded.updated_at''', payload)
+    enqueue_outbox(con, 'job', key, payload)
+    return key
+
+
+def rows_to_dicts(rows):
+    return [dict(r) for r in rows]
+
+
+def status_rank(status):
+    order = {'Needs Review': 0, 'Blocked': 1, 'Needs Credential': 2, 'In Progress': 3, 'Ready': 4, 'Needs Worker': 5, 'Paused': 8, 'Done': 9, 'Archived': 10}
+    return order.get(status or '', 6)
+
+
+def priority_rank(priority):
+    return {'Urgent': 0, 'High': 1, 'Normal': 2, 'Low': 3}.get(priority or '', 2)
+
+
+def list_projects(con):
+    return rows_to_dicts(con.execute("SELECT * FROM projects WHERE status != 'Archived' ORDER BY project_name LIMIT 50"))
+
+
+def find_project(con, target):
+    needle = norm(target)
+    if not needle:
+        return None
+    rows = list_projects(con)
+
+    def name_match(row):
+        aliases = json.loads(row.get('aliases_json') or '[]')
+        names = [row.get('project_key'), row.get('project_name')] + aliases
+        return any(needle == norm(x) or needle in norm(x) or norm(x) in needle for x in names if x)
+
+    primary = next((r for r in rows if name_match(r)), None)
+    if primary:
+        return primary
+
+    def secondary_match(row):
+        fields = [row.get('repo'), row.get('current_route'), row.get('phone_rule')]
+        return any(needle == norm(x) or needle in norm(x) for x in fields if x)
+
+    return next((r for r in rows if secondary_match(r)), None)
+
+
+def top_job(con, project_key=None):
+    rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE status NOT IN ('Done','Archived') ORDER BY updated_at DESC LIMIT 100"))
+    if project_key:
+        rows = [r for r in rows if r.get('project_key') == project_key]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (status_rank(r.get('status')), priority_rank(r.get('priority')), r.get('updated_at') or ''))
+    return rows[0]
+
+
+def counts(con):
+    names = ['projects', 'jobs', 'leases', 'events', 'sync_outbox']
+    return {name: con.execute(f'SELECT COUNT(*) c FROM {name}').fetchone()['c'] for name in names}
+
+
+def bootstrap(con, intent='CONTINUE', target=''):
+    project = find_project(con, target) if target else None
+    job = top_job(con, project.get('project_key') if project else None)
+    result = {
+        'ok': True,
+        'version': 'v2-prototype',
+        'intent': intent or 'CONTINUE',
+        'target': target or '',
+        'project': project,
+        'top_job': job,
+        'counts': counts(con),
+        'projects': list_projects(con)[:12],
+        'next_safe_action': 'status_only'
+    }
+    if job:
+        if job.get('status') in ('Needs Review', 'Blocked', 'Needs Credential'):
+            result['next_safe_action'] = 'ask_user_or_alert_slack'
+        elif job.get('status') in ('Ready', 'Needs Worker'):
+            result['next_safe_action'] = 'claim_lease_when_worker_template_ready'
+        elif job.get('status') == 'In Progress':
+            result['next_safe_action'] = 'monitor_active_lease'
+    event(con, 'INFO', 'bootstrap', 'bootstrap_or_continue called', project.get('project_key') if project else None, job.get('job_id') if job else None, {'intent': intent, 'target': target, 'next': result['next_safe_action']})
+    return result
+
+
+def emergency_stop(con, target=''):
+    project = find_project(con, target) if target else None
+    job = top_job(con, project.get('project_key') if project else None)
+    if not job:
+        event(con, 'WARN', 'stop', 'STOP requested but no active job found', project.get('project_key') if project else None)
+        return {'ok': True, 'stopped': False, 'message': 'No active job found.'}
+    con.execute("UPDATE jobs SET status='Paused', current_step=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE job_id=?", ('Emergency STOP requested. Worker kill hook pending in next ticket.', now_iso(), job['job_id']))
+    con.execute("UPDATE leases SET status='Expired', recovery_action='Emergency STOP released lease', heartbeat_at=? WHERE job_id=? AND status='Active'", (now_iso(), job['job_id']))
+    event(con, 'WARN', 'stop', 'Emergency STOP recorded; worker kill hook pending', job.get('project_key'), job.get('job_id'))
+    enqueue_outbox(con, 'job', job['job_id'], {'job_id': job['job_id'], 'status': 'Paused', 'reason': 'Emergency STOP'})
+    return {'ok': True, 'stopped': True, 'job_id': job['job_id'], 'message': 'STOP recorded; active lease released. Worker kill hook is next ticket.'}
