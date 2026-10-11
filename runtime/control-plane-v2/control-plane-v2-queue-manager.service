@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Control Plane V2 queue manager one-shot claim
+After=network-online.target control-plane-v2-gateway.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
+Environment=CONTROL_PLANE_V2_DB=/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
+ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/queue_manager.py --apply --complete-placeholder
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2 /home/aioperator/control-plane/runtime/control-plane-v2
+MemoryMax=256M
+CPUQuota=50%
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

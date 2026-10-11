@@ -1,0 +1,25 @@
+project: example-project
+aliases: [example]
+repo: owner/repo
+vps_path: /home/aioperator/worker/projects/example-project
+slack_channel: C0C7UTEHR4K
+production_state: sandbox
+worker: vps-local-gateway
+runtime:
+  environment: .venv
+  setup: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+  test: .venv/bin/python -m pytest
+limits:
+  max_runtime_minutes: 20
+  max_attempts: 3
+  daily_budget_cents: 0
+allowed:
+  files: [src/**, tests/**]
+  actions: [read, edit, test, branch, pull_request]
+forbidden:
+  files: [.env, secrets/**, credentials/**]
+  actions: [production_deploy, billing_change, permission_change, destructive_delete]
+approvals:
+  red_actions: explicit_slack_approve
+rollback:
+  command: git reset --hard HEAD

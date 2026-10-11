@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI Control Plane V2 watchdog every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=control-plane-v2-watchdog.service
+
+[Install]
+WantedBy=timers.target
