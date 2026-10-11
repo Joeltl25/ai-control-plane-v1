@@ -176,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             con = init_db(DB)
             if self.path == '/bootstrap_or_continue':
+                if not self.auth_ok():
+                    return self.write(401, {'ok':False,'error':'unauthorized'})
                 return self.write(200, bootstrap(con, payload.get('intent','CONTINUE'), payload.get('project','') or payload.get('target','')))
             if self.path == '/claim_next':
                 if not self.auth_ok():
