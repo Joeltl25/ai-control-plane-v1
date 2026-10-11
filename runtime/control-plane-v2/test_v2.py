@@ -1,5 +1,6 @@
-import json, tempfile
+import json, tempfile, os
 from engine import init_db, upsert_project, upsert_job, bootstrap, emergency_stop, claim_next_job, complete_job, heartbeat_job, expire_old_leases
+from slack_actions import mark_top_job, record_approval
 
 
 def main():
@@ -51,17 +52,24 @@ def main():
     b = bootstrap(con, 'CONTINUE', 'blue aces')
     assert b['top_job']['status'] == 'Needs Review', b
 
+    plan = mark_top_job(con, 'Planning', 'Plan accepted.', 'blue aces')
+    assert plan['updated'] is True and plan['status'] == 'Planning', plan
+    ready = mark_top_job(con, 'Ready', 'Ready after plan.', 'blue aces')
+    assert ready['updated'] is True and ready['status'] == 'Ready', ready
+    appr = record_approval(con, 'blue aces', 'Merge', 'tester')
+    assert appr['recorded'] is True and appr['job_id'] == 'JOB-T1', appr
+
     unknown = emergency_stop(con, 'not a real project')
     assert unknown['stopped'] is False, unknown
     c = bootstrap(con, 'CONTINUE', 'blue aces')
-    assert c['top_job']['status'] == 'Needs Review', c
+    assert c['top_job']['status'] == 'Ready', c
 
     s = emergency_stop(con, 'blue aces')
     assert s['stopped'] is True, s
     d = bootstrap(con, 'CONTINUE', 'blue aces')
     assert d['top_job']['status'] == 'Paused', d
 
-    print(json.dumps({'ok': True, 'tests': 10}, sort_keys=True))
+    print(json.dumps({'ok': True, 'tests': 13}, sort_keys=True))
 
 if __name__ == '__main__':
     main()
