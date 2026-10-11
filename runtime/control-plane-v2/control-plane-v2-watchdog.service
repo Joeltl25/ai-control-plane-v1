@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Control Plane V2 Watchdog
+After=network-online.target control-plane-v2-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
+Environment=CONTROL_PLANE_V2_DB=/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite
+ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/watchdog.py --apply
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
