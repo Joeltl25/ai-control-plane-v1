@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Control Plane V2 Airtable mirror outbox drain
+After=network-online.target control-plane-v2-gateway.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
+Environment=CONTROL_PLANE_V2_DB=/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite
+Environment=CONTROL_PLANE_AIRTABLE_BASE=apptauaPVwi4qo1EL
+ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/airtable_mirror.py --apply --limit 25
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2 /home/aioperator/control-plane/runtime/control-plane-v2
+MemoryMax=256M
+CPUQuota=50%
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
