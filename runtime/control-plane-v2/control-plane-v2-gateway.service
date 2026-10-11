@@ -7,6 +7,9 @@ Type=simple
 WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
 Environment=CONTROL_PLANE_V2_HOST=127.0.0.1
 Environment=CONTROL_PLANE_V2_PORT=8801
+Environment=CONTROL_PLANE_V2_API_TOKEN_FILE=/home/aioperator/worker/credentials/ai-control-plane/control-plane-v2-api-token
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
 ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/server.py
 Restart=always
 RestartSec=5
