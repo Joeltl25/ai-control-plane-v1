@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI Control Plane V2 queue manager every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
