@@ -1,6 +1,6 @@
 import hmac, json, os
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from engine import init_db, bootstrap, emergency_stop, counts
+from engine import init_db, bootstrap, emergency_stop, counts, claim_next_job, complete_job, heartbeat_job
 
 HOST = os.environ.get('CONTROL_PLANE_V2_HOST','127.0.0.1')
 PORT = int(os.environ.get('CONTROL_PLANE_V2_PORT','8799'))
@@ -43,6 +43,18 @@ class Handler(BaseHTTPRequestHandler):
             con = init_db(DB)
             if self.path == '/bootstrap_or_continue':
                 return self.write(200, bootstrap(con, payload.get('intent','CONTINUE'), payload.get('project','') or payload.get('target','')))
+            if self.path == '/claim_next':
+                if not self.auth_ok():
+                    return self.write(401, {'ok':False,'error':'unauthorized'})
+                return self.write(200, claim_next_job(con, payload.get('worker','v2-api-worker'), int(payload.get('lease_seconds') or 1200)))
+            if self.path == '/heartbeat':
+                if not self.auth_ok():
+                    return self.write(401, {'ok':False,'error':'unauthorized'})
+                return self.write(200, heartbeat_job(con, payload.get('job_id',''), payload.get('worker','v2-api-worker'), int(payload.get('extend_seconds') or 1200)))
+            if self.path == '/complete':
+                if not self.auth_ok():
+                    return self.write(401, {'ok':False,'error':'unauthorized'})
+                return self.write(200, complete_job(con, payload.get('job_id',''), payload.get('worker','v2-api-worker'), payload.get('status','Needs Review'), payload.get('message','Completed by V2 API worker.')))
             if self.path == '/stop':
                 if not self.auth_ok():
                     return self.write(401, {'ok':False,'error':'unauthorized'})
