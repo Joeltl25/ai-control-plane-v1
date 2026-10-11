@@ -1,21 +1,14 @@
-import json
-import os
-import re
-import sqlite3
-import time
+import json, os, sqlite3, time, re, subprocess
 from pathlib import Path
 
 DEFAULT_DB = '/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite'
 DB_PATH = os.environ.get('CONTROL_PLANE_V2_DB', DEFAULT_DB)
 
-
 def now_iso():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-
 def norm(value):
     return re.sub(r'[^a-z0-9]+', '-', str(value or '').lower()).strip('-') or 'unknown'
-
 
 def connect(db_path=DB_PATH):
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -25,7 +18,6 @@ def connect(db_path=DB_PATH):
     con.execute('PRAGMA foreign_keys=ON')
     con.execute('PRAGMA busy_timeout=5000')
     return con
-
 
 def init_db(db_path=DB_PATH):
     con = connect(db_path)
@@ -139,16 +131,13 @@ def init_db(db_path=DB_PATH):
     ''')
     return con
 
-
 def enqueue_outbox(con, entity, key, payload, target='airtable', op='upsert'):
     con.execute('INSERT INTO sync_outbox(ts,target,op,entity,entity_key,payload_json) VALUES(?,?,?,?,?,?)',
                 (now_iso(), target, op, entity, key, json.dumps(payload, ensure_ascii=False)))
 
-
 def event(con, level, source, message, project_key=None, job_id=None, data=None):
     con.execute('INSERT INTO events(ts,level,source,project_key,job_id,message,data_json) VALUES(?,?,?,?,?,?,?)',
                 (now_iso(), level, source, project_key, job_id, message, json.dumps(data or {}, ensure_ascii=False)))
-
 
 def upsert_project(con, p):
     key = p.get('project_key') or norm(p.get('project_name'))
@@ -166,9 +155,8 @@ def upsert_project(con, p):
     enqueue_outbox(con, 'project', key, payload)
     return key
 
-
 def upsert_job(con, j):
-    key = j.get('job_id') or f'job-{int(time.time())}'
+    key = j.get('job_id') or f"job-{int(time.time())}"
     defaults = {
         'project_key': None, 'status': 'Ready', 'priority': 'Normal',
         'request': '', 'current_step': '', 'next_action': '', 'worker': '',
@@ -184,48 +172,42 @@ def upsert_job(con, j):
     enqueue_outbox(con, 'job', key, payload)
     return key
 
-
 def rows_to_dicts(rows):
     return [dict(r) for r in rows]
 
-
 def status_rank(status):
-    order = {'Needs Review': 0, 'Blocked': 1, 'Needs Credential': 2, 'In Progress': 3, 'Ready': 4, 'Needs Worker': 5, 'Paused': 8, 'Done': 9, 'Archived': 10}
+    order = {
+      'Needs Review': 0, 'Blocked': 1, 'Needs Credential': 2,
+      'In Progress': 3, 'Ready': 4, 'Needs Worker': 5,
+      'Paused': 8, 'Done': 9, 'Archived': 10
+    }
     return order.get(status or '', 6)
 
-
 def priority_rank(priority):
-    return {'Urgent': 0, 'High': 1, 'Normal': 2, 'Low': 3}.get(priority or '', 2)
-
+    return {'Urgent':0, 'High':1, 'Normal':2, 'Low':3}.get(priority or '', 2)
 
 def list_projects(con):
     return rows_to_dicts(con.execute("SELECT * FROM projects WHERE status != 'Archived' ORDER BY project_name LIMIT 50"))
-
 
 def find_project(con, target):
     needle = norm(target)
     if not needle:
         return None
     rows = list_projects(con)
-
     def name_match(row):
         aliases = json.loads(row.get('aliases_json') or '[]')
         names = [row.get('project_key'), row.get('project_name')] + aliases
         return any(needle == norm(x) or needle in norm(x) or norm(x) in needle for x in names if x)
-
     primary = next((r for r in rows if name_match(r)), None)
     if primary:
         return primary
-
     def secondary_match(row):
         fields = [row.get('repo'), row.get('current_route'), row.get('phone_rule')]
         return any(needle == norm(x) or needle in norm(x) for x in fields if x)
-
     return next((r for r in rows if secondary_match(r)), None)
 
-
 def top_job(con, project_key=None):
-    rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE status NOT IN ('Done','Archived') ORDER BY updated_at DESC LIMIT 100"))
+    rows = rows_to_dicts(con.execute('SELECT * FROM jobs WHERE status NOT IN (\'Done\',\'Archived\') ORDER BY updated_at DESC LIMIT 100'))
     if project_key:
         rows = [r for r in rows if r.get('project_key') == project_key]
     if not rows:
@@ -233,45 +215,95 @@ def top_job(con, project_key=None):
     rows.sort(key=lambda r: (status_rank(r.get('status')), priority_rank(r.get('priority')), r.get('updated_at') or ''))
     return rows[0]
 
-
 def counts(con):
-    names = ['projects', 'jobs', 'leases', 'events', 'sync_outbox']
+    names = ['projects','jobs','leases','events','sync_outbox']
     return {name: con.execute(f'SELECT COUNT(*) c FROM {name}').fetchone()['c'] for name in names}
-
 
 def bootstrap(con, intent='CONTINUE', target=''):
     project = find_project(con, target) if target else None
     job = top_job(con, project.get('project_key') if project else None)
+    active_projects = list_projects(con)
     result = {
-        'ok': True,
-        'version': 'v2-prototype',
-        'intent': intent or 'CONTINUE',
-        'target': target or '',
-        'project': project,
-        'top_job': job,
-        'counts': counts(con),
-        'projects': list_projects(con)[:12],
-        'next_safe_action': 'status_only'
+      'ok': True,
+      'version': 'v2-prototype',
+      'intent': intent or 'CONTINUE',
+      'target': target or '',
+      'project': project,
+      'top_job': job,
+      'counts': counts(con),
+      'projects': active_projects[:12],
+      'next_safe_action': 'status_only'
     }
     if job:
-        if job.get('status') in ('Needs Review', 'Blocked', 'Needs Credential'):
+        if job.get('status') in ('Needs Review','Blocked','Needs Credential'):
             result['next_safe_action'] = 'ask_user_or_alert_slack'
-        elif job.get('status') in ('Ready', 'Needs Worker'):
+        elif job.get('status') in ('Ready','Needs Worker'):
             result['next_safe_action'] = 'claim_lease_when_worker_template_ready'
         elif job.get('status') == 'In Progress':
             result['next_safe_action'] = 'monitor_active_lease'
     event(con, 'INFO', 'bootstrap', 'bootstrap_or_continue called', project.get('project_key') if project else None, job.get('job_id') if job else None, {'intent': intent, 'target': target, 'next': result['next_safe_action']})
     return result
 
+def safe_systemd_instance(value):
+    raw = str(value or 'unknown')
+    safe = re.sub(r'[^A-Za-z0-9_.:-]+', '-', raw).strip('-')[:80]
+    return safe or 'unknown'
+
+def worker_unit_for_job(job):
+    return 'control-plane-v2-worker@' + safe_systemd_instance(job.get('job_id')) + '.service'
+
+def systemd_user_env():
+    uid = str(os.getuid())
+    env = os.environ.copy()
+    env.setdefault('XDG_RUNTIME_DIR', '/run/user/' + uid)
+    env.setdefault('DBUS_SESSION_BUS_ADDRESS', 'unix:path=/run/user/' + uid + '/bus')
+    return env
+
+def run_systemctl(args, timeout=8):
+    try:
+        cp = subprocess.run(['systemctl','--user'] + list(args), text=True, capture_output=True, timeout=timeout, env=systemd_user_env())
+        return {'ok': cp.returncode == 0, 'returncode': cp.returncode, 'stdout': cp.stdout.strip()[:500], 'stderr': cp.stderr.strip()[:500]}
+    except Exception as exc:
+        return {'ok': False, 'returncode': -1, 'stdout': '', 'stderr': str(exc)[:500]}
+
+def kill_worker_service_for_job(job):
+    unit = worker_unit_for_job(job)
+    if not unit.startswith('control-plane-v2-worker@') or not unit.endswith('.service'):
+        return {'unit': unit, 'killed': False, 'error': 'unsafe_unit_name'}
+    show = run_systemctl(['show', unit, '--property=LoadState', '--property=ActiveState', '--value'])
+    states = [x for x in (show.get('stdout') or '').splitlines() if x]
+    load_state = states[0] if len(states) > 0 else 'unknown'
+    active_state = states[1] if len(states) > 1 else 'unknown'
+    result = {'unit': unit, 'load_state': load_state, 'active_state': active_state, 'killed': False, 'show': show}
+    if active_state not in ('active', 'activating'):
+        result['message'] = 'worker unit not active; no OS kill needed'
+        return result
+    result['term'] = run_systemctl(['kill', '-s', 'SIGTERM', unit])
+    time.sleep(1)
+    result['kill'] = run_systemctl(['kill', '-s', 'SIGKILL', unit])
+    result['stop'] = run_systemctl(['stop', unit])
+    result['killed'] = bool(result['term'].get('ok') or result['kill'].get('ok') or result['stop'].get('ok'))
+    return result
 
 def emergency_stop(con, target=''):
-    project = find_project(con, target) if target else None
-    job = top_job(con, project.get('project_key') if project else None)
+    target_text = str(target or '').strip()
+    project = None
+    project_key = None
+    if target_text and norm(target_text) not in ('all', 'global'):
+        project = find_project(con, target_text)
+        if not project:
+            event(con, 'WARN', 'stop', 'STOP requested for unknown target; no global fallback used', None, None, {'target': target_text})
+            return {'ok': True, 'stopped': False, 'message': 'Unknown target; no worker stopped.'}
+        project_key = project.get('project_key')
+    job = top_job(con, project_key)
     if not job:
-        event(con, 'WARN', 'stop', 'STOP requested but no active job found', project.get('project_key') if project else None)
+        event(con, 'WARN', 'stop', 'STOP requested but no active job found', project_key)
         return {'ok': True, 'stopped': False, 'message': 'No active job found.'}
-    con.execute("UPDATE jobs SET status='Paused', current_step=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE job_id=?", ('Emergency STOP requested. Worker kill hook pending in next ticket.', now_iso(), job['job_id']))
-    con.execute("UPDATE leases SET status='Expired', recovery_action='Emergency STOP released lease', heartbeat_at=? WHERE job_id=? AND status='Active'", (now_iso(), job['job_id']))
-    event(con, 'WARN', 'stop', 'Emergency STOP recorded; worker kill hook pending', job.get('project_key'), job.get('job_id'))
-    enqueue_outbox(con, 'job', job['job_id'], {'job_id': job['job_id'], 'status': 'Paused', 'reason': 'Emergency STOP'})
-    return {'ok': True, 'stopped': True, 'job_id': job['job_id'], 'message': 'STOP recorded; active lease released. Worker kill hook is next ticket.'}
+    kill_result = kill_worker_service_for_job(job)
+    con.execute("UPDATE jobs SET status='Paused', current_step=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE job_id=?",
+                ('Emergency STOP requested. Exact worker service kill attempted: ' + kill_result.get('unit','unknown'), now_iso(), job['job_id']))
+    con.execute("UPDATE leases SET status='Expired', recovery_action='Emergency STOP released lease', heartbeat_at=? WHERE job_id=? AND status='Active'",
+                (now_iso(), job['job_id']))
+    event(con, 'WARN', 'stop', 'Emergency STOP recorded and worker kill hook attempted', job.get('project_key'), job.get('job_id'), kill_result)
+    enqueue_outbox(con, 'job', job['job_id'], {'job_id': job['job_id'], 'status': 'Paused', 'reason': 'Emergency STOP', 'kill_result': kill_result, 'updated_at': now_iso()})
+    return {'ok': True, 'stopped': True, 'job_id': job['job_id'], 'kill_result': kill_result, 'message': 'STOP recorded; exact worker service kill attempted; active lease released.'}
