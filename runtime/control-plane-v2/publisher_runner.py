@@ -40,6 +40,8 @@ def publish_job(job_id):
         github=GitHubPublisher()
         github.verify_write_scope()
         pr=github.publish(ticket['branch'],base,files,job_id)
+        data['publisher_result']=pr
+        con.execute('UPDATE jobs SET raw_json=? WHERE job_id=?',(json.dumps(data),job_id))
         con.execute('UPDATE jobs SET pr_url=?,branch=?,worker=?,updated_at=? WHERE job_id=?',
             (pr['pr_url'],ticket['branch'],'codex',now_iso(),job_id))
         enqueue_outbox(con,'job',job_id,{'job_id':job_id,'pr_url':pr['pr_url'],'branch':ticket['branch'],'worker':'codex','updated_at':now_iso()})

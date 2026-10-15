@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Control Plane V2 GitHub merge guard after explicit phone approval for %i
+After=network-online.target control-plane-v2-gateway.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
+Environment=CONTROL_PLANE_V2_DB=/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite
+ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/merge_guard.py %i
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=/home/aioperator/.codex
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2
+MemoryMax=450M
+CPUQuota=50%
+TasksMax=60
+RuntimeMaxSec=900
+
+[Install]
+WantedBy=default.target

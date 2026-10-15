@@ -118,7 +118,8 @@ def handle_v2_command(payload):
             return 200, f"{r['job_id']} accepted by bounded worker. Review progress in Slack."
         return 200, 'CODE not started: ' + str(r.get('reason') or r.get('message') or 'NO_ELIGIBLE_JOB')
     if command == 'APPROVE':
-        r = record_approval(con, target, 'Merge', user)
+        from slack_actions import approve_exact_job
+        r = approve_exact_job(con,target,user)
         return 200, r.get('message')
     if command == 'RETRY':
         r = mark_top_job(con, 'Ready', 'Slack RETRY accepted. Same route only, bounded by attempts.', target)
