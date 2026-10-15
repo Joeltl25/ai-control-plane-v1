@@ -110,14 +110,30 @@ def handle_v2_command(payload):
         return 200, r.get('message') + (' Target: ' + target if target else '')
     if command == 'APPROVE PLAN':
         r = mark_top_job(con, 'Ready', 'Slack APPROVE PLAN accepted. Draft tickets may enter the V2 queue.', target)
+        if r.get('updated') and r.get('job_id'):
+            from slack_replies import remember
+            remember(r['job_id'], payload.get('response_url'))
         return 200, r.get('message')
     if command == 'CODE':
-        r = claim_next_job(con, 'v2-slack-command', 1200, None)
+        from queue_manager import run_once
+        from slack_replies import remember
+        preview = run_once(apply=False)
+        if preview.get('candidate'):
+            remember(preview['candidate'], payload.get('response_url'))
+        r = run_once(apply=True)
         if r.get('claimed'):
-            return 200, f"{r['job_id']} claimed by V2 until {r['locked_until']}. Queue timer remains controlled by approval rules."
-        return 200, r.get('message','No claimable job found.')
+            return 200, f"{r['job_id']} accepted by bounded worker. Review progress in Slack."
+        return 200, 'CODE not started: ' + str(r.get('reason') or r.get('message') or 'NO_ELIGIBLE_JOB')
     if command == 'APPROVE':
-        r = record_approval(con, target, 'Merge', user)
+        from slack_actions import approve_exact_job
+        from slack_replies import remember
+        from merge_guard import approval_candidate
+        try:
+            row=approval_candidate(con,target)[0]
+            remember(row['job_id'],payload.get('response_url'))
+        except (ValueError,KeyError,TypeError):
+            pass
+        r = approve_exact_job(con,target,user)
         return 200, r.get('message')
     if command == 'RETRY':
         r = mark_top_job(con, 'Ready', 'Slack RETRY accepted. Same route only, bounded by attempts.', target)
@@ -166,10 +182,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == '/slack/command':
                 raw = self.read_raw()
-                if os.environ.get('CONTROL_PLANE_SKIP_SLACK_VERIFY') != '1':
-                    ok, err = verify_slack(self.headers, raw)
-                    if not ok:
-                        return self.write(401, slack_json('Rejected: ' + err))
+                ok, err = verify_slack(self.headers, raw)
+                if not ok:
+                    return self.write(401, slack_json('Rejected: ' + err))
                 payload = parse_body(raw, self.headers.get('content-type') or '')
                 status, text = handle_v2_command(payload)
                 return self.write(status, slack_json(text))
@@ -182,7 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/claim_next':
                 if not self.auth_ok():
                     return self.write(401, {'ok':False,'error':'unauthorized'})
-                return self.write(200, claim_next_job(con, payload.get('worker','v2-api-worker'), int(payload.get('lease_seconds') or 1200), payload.get('project_key') or None))
+                from queue_manager import run_once
+                return self.write(200, run_once(apply=True))
             if self.path == '/heartbeat':
                 if not self.auth_ok():
                     return self.write(401, {'ok':False,'error':'unauthorized'})
@@ -190,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/complete':
                 if not self.auth_ok():
                     return self.write(401, {'ok':False,'error':'unauthorized'})
-                return self.write(200, complete_job(con, payload.get('job_id',''), payload.get('worker','v2-api-worker'), payload.get('status','Needs Review'), payload.get('message','Completed by V2 API worker.')))
+                return self.write(409, {'ok':False,'reason':'EXTERNAL_COMPLETION_DISABLED','message':'Only leased worker and publisher units may complete coding jobs.'})
             if self.path == '/stop':
                 if not self.auth_ok():
                     return self.write(401, {'ok':False,'error':'unauthorized'})

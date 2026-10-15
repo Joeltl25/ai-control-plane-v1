@@ -196,7 +196,7 @@ def find_project(con, target):
     rows = list_projects(con)
     def name_match(row):
         aliases = json.loads(row.get('aliases_json') or '[]')
-        names = [row.get('project_key'), row.get('project_name')] + aliases
+        names = [row['project_key'] if 'project_key' in row.keys() else None, row.get('project_name')] + aliases
         return any(needle == norm(x) or needle in norm(x) or norm(x) in needle for x in names if x)
     primary = next((r for r in rows if name_match(r)), None)
     if primary:
@@ -285,6 +285,7 @@ def kill_worker_service_for_job(job):
     result['killed'] = bool(result['term'].get('ok') or result['kill'].get('ok') or result['stop'].get('ok'))
     return result
 
+
 def utc_plus_seconds(seconds):
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + int(seconds)))
 
@@ -299,9 +300,12 @@ def expire_old_leases(con):
         event(con, 'WARN', 'lease', 'Expired stale leases', data={'count': len(expired), 'jobs': [r['job_id'] for r in expired]})
     return len(expired)
 
-def claim_next_job(con, worker_key='v2-local-worker', lease_seconds=1200, project_key=None):
+def claim_next_job(con, worker_key='v2-local-worker', lease_seconds=1200, project_key=None, job_id=None):
     expire_old_leases(con)
-    rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE status IN ('Ready','Needs Worker') ORDER BY updated_at DESC LIMIT 200"))
+    if job_id:
+        rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE job_id=? AND status IN ('Ready','Needs Worker') LIMIT 1", (job_id,)))
+    else:
+        rows = rows_to_dicts(con.execute("SELECT * FROM jobs WHERE status IN ('Ready','Needs Worker') ORDER BY updated_at DESC LIMIT 200"))
     if project_key:
         rows = [r for r in rows if r.get('project_key') == project_key]
     if not rows:
@@ -309,18 +313,20 @@ def claim_next_job(con, worker_key='v2-local-worker', lease_seconds=1200, projec
         return {'ok': True, 'claimed': False, 'message': 'No claimable job found.'}
     rows.sort(key=lambda r: (priority_rank(r.get('priority')), r.get('updated_at') or ''))
     job = rows[0]
+    if int(job.get('attempts') or 0) >= int(job.get('max_attempts') or 0):
+        return {'ok':False,'claimed':False,'reason':'attempt_limit_reached'}
     lease_id = 'lease-' + uuid.uuid4().hex[:16]
     locked_until = utc_plus_seconds(lease_seconds)
     now = now_iso()
     try:
         con.execute('BEGIN IMMEDIATE')
         fresh = con.execute("SELECT status, locked_by FROM jobs WHERE job_id=?", (job['job_id'],)).fetchone()
-        if not fresh or fresh['status'] not in ('Ready','Needs Worker'):
+        if not fresh or fresh['status'] not in ('Ready','Needs Worker') or fresh['locked_by']:
             con.execute('ROLLBACK')
             return {'ok': True, 'claimed': False, 'message': 'Job changed before claim.'}
         con.execute("INSERT INTO leases(lease_id,job_id,resource,locked_by,locked_until,status,heartbeat_at,created_at) VALUES(?,?,?,?,?,'Active',?,?)",
                     (lease_id, job['job_id'], 'systemd-worker', worker_key, locked_until, now, now))
-        con.execute("UPDATE jobs SET status='In Progress', locked_by=?, locked_until=?, current_step=?, updated_at=? WHERE job_id=?",
+        con.execute("UPDATE jobs SET status='In Progress', attempts=attempts+1, locked_by=?, locked_until=?, current_step=?, updated_at=? WHERE job_id=?",
                     (worker_key, locked_until, 'Claimed by V2 queue manager; placeholder worker execution allowed only.', now, job['job_id']))
         con.execute('COMMIT')
     except Exception:
@@ -380,3 +386,31 @@ def emergency_stop(con, target=''):
     event(con, 'WARN', 'stop', 'Emergency STOP recorded and worker kill hook attempted', job.get('project_key'), job.get('job_id'), kill_result)
     enqueue_outbox(con, 'job', job['job_id'], {'job_id': job['job_id'], 'status': 'Paused', 'reason': 'Emergency STOP', 'kill_result': kill_result, 'updated_at': now_iso()})
     return {'ok': True, 'stopped': True, 'job_id': job['job_id'], 'kill_result': kill_result, 'message': 'STOP recorded; exact worker service kill attempted; active lease released.'}
+
+
+def mark_top_job(con, status, step, target=''):
+    project = find_project(con, target) if target else None
+    project_key = project.get('project_key') if project else None
+    job = top_job(con, project_key)
+    if not job:
+        event(con, 'WARN', 'mark', 'No job found to update', project_key, None, {'status': status, 'target': target})
+        return {'ok': True, 'updated': False, 'message': 'No job found to update.'}
+    now = now_iso()
+    con.execute("UPDATE jobs SET status=?, current_step=?, updated_at=? WHERE job_id=?", (status, step, now, job['job_id']))
+    enqueue_outbox(con, 'job', job['job_id'], {'job_id': job['job_id'], 'status': status, 'current_step': step, 'updated_at': now})
+    event(con, 'INFO', 'mark', 'Job status changed by command', job.get('project_key'), job.get('job_id'), {'status': status, 'step': step, 'target': target})
+    return {'ok': True, 'updated': True, 'job_id': job['job_id'], 'status': status, 'message': f"{job['job_id']}: {status}."}
+
+def record_approval(con, target='', approval_type='Merge', approved_by=''):
+    project = find_project(con, target) if target else None
+    project_key = project.get('project_key') if project else None
+    job = top_job(con, project_key)
+    if not job:
+        event(con, 'WARN', 'approval', 'No job found for approval', project_key, None, {'target': target})
+        return {'ok': True, 'recorded': False, 'message': 'No job found for approval.'}
+    now = now_iso()
+    approval_id = 'approval-' + uuid.uuid4().hex[:16]
+    con.execute("INSERT INTO approvals(approval_id,job_id,approval_type,status,approved_by,approval_text,pr_url,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (approval_id, job['job_id'], approval_type, 'Requested', approved_by, 'Approval recorded by V2 Slack/launcher route', job.get('pr_url') or '', now))
+    event(con, 'INFO', 'approval', 'Approval recorded', job.get('project_key'), job.get('job_id'), {'approval_id': approval_id, 'type': approval_type, 'approved_by': approved_by})
+    return {'ok': True, 'recorded': True, 'approval_id': approval_id, 'job_id': job['job_id'], 'message': f"{job['job_id']} approval recorded. Merge guard still requires PR re-fetch and expected head SHA."}
