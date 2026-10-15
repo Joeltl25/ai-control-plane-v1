@@ -1,20 +1,24 @@
 [Unit]
-Description=AI Control Plane V2 bounded worker for %i
+Description=AI Control Plane V2 scoped Codex worker for %i
 After=network-online.target control-plane-v2-gateway.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/home/aioperator/control-plane/runtime/control-plane-v2
 Environment=CONTROL_PLANE_V2_DB=/home/aioperator/control-plane/state/control-plane-v2/control-plane.sqlite
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus
 ExecStart=/usr/bin/python3 /home/aioperator/control-plane/runtime/control-plane-v2/worker_runner.py %i
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2 /home/aioperator/control-plane/runtime/control-plane-v2
-MemoryMax=512M
+ProtectHome=read-only
+InaccessiblePaths=/home/aioperator/worker/credentials
+ReadWritePaths=/home/aioperator/control-plane/state/control-plane-v2 /home/aioperator/.codex
+MemoryMax=1500M
 CPUQuota=80%
-RuntimeMaxSec=1200
+TasksMax=90
+RuntimeMaxSec=1500
 
 [Install]
 WantedBy=default.target
