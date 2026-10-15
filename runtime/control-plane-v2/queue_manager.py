@@ -17,9 +17,9 @@ def run_once(apply=False):
     ok,reason=token_status()
     if not ok:return {'ok':True,'claimed':False,'reason':reason}
     from watchdog import safe_file_status
+    from slack_replies import callback_ready
     alert=safe_file_status(SLACK_WEBHOOK)
-    if not (alert['present'] and alert['non_empty'] and alert['safe_permissions']) or SLACK_WEBHOOK.is_symlink():
-        return {'ok':True,'claimed':False,'reason':'SLACK_WEBHOOK_NOT_CONFIGURED'}
+    persistent_alert=bool(alert['present'] and alert['non_empty'] and alert['safe_permissions'] and not SLACK_WEBHOOK.is_symlink())
     rows=con.execute("SELECT * FROM jobs WHERE project_key=? AND status IN ('Ready','Needs Worker') ORDER BY updated_at DESC LIMIT 20",(PILOT_PROJECT,)).fetchall()
     for row in rows:
         try:
@@ -31,6 +31,8 @@ def run_once(apply=False):
                 raise ValueError('attempt_limit_reached')
         except (ValueError,KeyError,TypeError) as exc:
             continue  # Do not claim malformed jobs; fail closed.
+        if apply and not persistent_alert and not callback_ready(row['job_id']):
+            continue  # No safe phone notification route for this job.
         if not apply:return {'ok':True,'claimed':False,'candidate':row['job_id'],'reason':'DRY_RUN'}
         claim=claim_next_job(con,worker_key=WORKER,lease_seconds=1200,project_key=PILOT_PROJECT,job_id=row['job_id'])
         if not claim.get('claimed'):return {'ok':False,'claimed':False,'claim':claim}

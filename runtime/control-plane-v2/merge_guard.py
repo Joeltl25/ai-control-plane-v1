@@ -98,12 +98,14 @@ def approve_and_merge(job_id):
         con.execute("UPDATE approvals SET status='Completed' WHERE approval_id=?",(approval['approval_id'],))
         enqueue_outbox(con,'job',job_id,{'job_id':job_id,'status':'Done','pr_url':row['pr_url'],'updated_at':now_iso()})
         event(con,'INFO','merge_guard','PR merged after signed Slack approval and tests',job_id=job_id,data={'pr_url':row['pr_url'],'head_sha':head})
-        post_slack_webhook('Merged approved '+job_id+': '+row['pr_url']+' (tests passed)')
+        from slack_replies import notify
+        notify(job_id,'Merged approved '+job_id+': '+row['pr_url']+' (tests passed)')
         return {'ok':True,'job_id':job_id,'pr_url':row['pr_url']}
     except Exception as exc:
         con.execute("UPDATE approvals SET status='Failed' WHERE approval_id=?",(approval['approval_id'],))
         event(con,'ERROR','merge_guard','Merge stopped without confirmed success',job_id=job_id,data={'reason':type(exc).__name__,'message':str(exc)[:120]})
-        post_slack_webhook('Merge stopped for '+job_id+': '+type(exc).__name__+'. PR remains for review: '+row['pr_url'])
+        from slack_replies import notify
+        notify(job_id,'Merge stopped for '+job_id+': '+type(exc).__name__+'. PR remains for review: '+row['pr_url'])
         raise
 
 if __name__=='__main__':

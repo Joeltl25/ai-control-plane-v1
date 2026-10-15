@@ -110,15 +110,29 @@ def handle_v2_command(payload):
         return 200, r.get('message') + (' Target: ' + target if target else '')
     if command == 'APPROVE PLAN':
         r = mark_top_job(con, 'Ready', 'Slack APPROVE PLAN accepted. Draft tickets may enter the V2 queue.', target)
+        if r.get('updated') and r.get('job_id'):
+            from slack_replies import remember
+            remember(r['job_id'], payload.get('response_url'))
         return 200, r.get('message')
     if command == 'CODE':
         from queue_manager import run_once
+        from slack_replies import remember
+        preview = run_once(apply=False)
+        if preview.get('candidate'):
+            remember(preview['candidate'], payload.get('response_url'))
         r = run_once(apply=True)
         if r.get('claimed'):
             return 200, f"{r['job_id']} accepted by bounded worker. Review progress in Slack."
         return 200, 'CODE not started: ' + str(r.get('reason') or r.get('message') or 'NO_ELIGIBLE_JOB')
     if command == 'APPROVE':
         from slack_actions import approve_exact_job
+        from slack_replies import remember
+        from merge_guard import approval_candidate
+        try:
+            row=approval_candidate(con,target)[0]
+            remember(row['job_id'],payload.get('response_url'))
+        except (ValueError,KeyError,TypeError):
+            pass
         r = approve_exact_job(con,target,user)
         return 200, r.get('message')
     if command == 'RETRY':

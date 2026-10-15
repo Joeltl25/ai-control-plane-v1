@@ -40,8 +40,14 @@ def approve_exact_job(con,target='',approved_by=''):
     ok,reason=token_status()
     if not ok:return {'recorded':False,'message':'Merge unavailable: '+reason+'. No PR was merged.'}
     hook=safe_file_status(SLACK_WEBHOOK_URL_FILE)
-    if not hook['present'] or not hook['safe_permissions']:
-        return {'recorded':False,'message':'Merge unavailable: Slack alert credential not configured.'}
+    from slack_replies import callback_ready
+    from merge_guard import approval_candidate
+    try:
+        candidate=approval_candidate(con,str(target or '').strip())[0]['job_id']
+    except (ValueError,KeyError,TypeError):
+        return {'recorded':False,'message':'Merge unavailable: no exact approved PR candidate.'}
+    if not (hook['present'] and hook['safe_permissions']) and not callback_ready(candidate):
+        return {'recorded':False,'message':'Merge unavailable: Slack alert route not configured or expired.'}
     try:
         record=approve(con,str(target or '').strip(),approved_by)
     except (ValueError,KeyError,TypeError) as exc:

@@ -47,7 +47,8 @@ def publish_job(job_id):
         enqueue_outbox(con,'job',job_id,{'job_id':job_id,'pr_url':pr['pr_url'],'branch':ticket['branch'],'worker':'codex','updated_at':now_iso()})
         complete_job(con,job_id,WORKER,status='Needs Review',message='Draft PR ready: '+pr['pr_url']+'; phone review required.')
         event(con,'INFO','publisher_runner','PR published after tests',job_id=job_id,data=pr)
-        notification=post_slack_webhook('PR ready for GitHub Mobile review: '+job_id+' '+pr['pr_url']+' . No automatic merge.')
+        from slack_replies import notify
+        notification=notify(job_id,'PR ready for GitHub Mobile review: '+job_id+' '+pr['pr_url']+' . No automatic merge.')
         print(json.dumps({'ok':True,'pr_url':pr['pr_url'],'slack_sent':notification.get('sent',False)}));return 0
     except CredentialUnavailable:reason='GitHub repository credential unavailable';status='Needs Credential'
     except (ValueError,KeyError,TypeError,UnicodeError,ExecutionFailed,PublishError):
@@ -56,7 +57,8 @@ def publish_job(job_id):
         reason='Unexpected publisher failure; review logs';status='Blocked'
     complete_job(con,job_id,WORKER,status=status,message=reason)
     event(con,'ERROR','publisher_runner','Publishing stopped',job_id=job_id,data={'status':status,'reason':reason})
-    post_slack_webhook('VPS job '+job_id+': '+status+'. '+reason)
+    from slack_replies import notify
+    notify(job_id,'VPS job '+job_id+': '+status+'. '+reason)
     print(json.dumps({'ok':False,'status':status,'reason':reason}));return 3
 
 if __name__=='__main__':sys.exit(publish_job(sys.argv[1] if len(sys.argv)>1 else ''))
